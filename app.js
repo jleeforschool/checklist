@@ -162,7 +162,26 @@
     try {
       const headers={'X-Access-Key':cfg.key};if(method==='PUT'){headers['Content-Type']='application/json';headers['X-Bin-Versioning']='false';}
       const response=await fetch(`https://api.jsonbin.io/v3/b/${cfg.bin}${method==='GET'?'/latest?meta=false':''}`,{method,headers,body:body?JSON.stringify(body):undefined,signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error'});
-      if(!response.ok) {const e=new Error(`HTTP ${response.status}`);e.status=response.status;throw e;}
+      if (!response.ok) {
+  let detail = '';
+
+  try {
+    const errorBody = await response.json();
+    if (typeof errorBody.message === 'string') {
+      detail = errorBody.message;
+    }
+  } catch (_) {
+    // 오류 응답이 JSON이 아니어도 상태 코드는 표시합니다.
+  }
+
+  const e = new Error(
+    `JSONbin ${method} 오류 (HTTP ${response.status})` +
+    (detail ? `: ${detail}` : '')
+  );
+  e.status = response.status;
+  throw e;
+}
+
       const raw=await response.json();
       return method==='GET'?validated(raw,true):raw;
     } finally {clearTimeout(timeout);}
@@ -193,7 +212,7 @@
       if([400,401,403,404].includes(e.status)||(!e.status && e.name!=='AbortError' && /데이터|Bin/.test(e.message))) {
         authBlocked=true;
         syncText='';
-        $('cloudError').textContent=[401,403].includes(e.status)?'JSONbin 인증 또는 권한이 거부되었습니다. Bin ID와 Access Key의 읽기·쓰기 권한을 확인하고 다시 연결하세요.':e.message;
+$('cloudError').textContent = e.message;
         warn($('cloudError').textContent);
       } else syncText=e.status===429?'요청 한도에 도달했습니다. 조회 간격을 늘리세요. 자동 재시도 간격을 늘렸습니다.':`통신 실패${e.name==='AbortError'?' (10초 시간 초과)':''} · 이 기기의 기록을 유지하며 자동 재시도합니다.`;
     } finally {
@@ -256,7 +275,8 @@
     if(scope!==bin)loadScope(bin);
     if(include&&offline){doc=merge(doc,offline);pending=true;observeClock();}
     config={bin,key,poll:Number($('pollSeconds').value)};sessionSave($('remember').checked);$('accessKey').value='';$('cloudError').textContent='';
-    persist();render();$('cloudDialog').close();sync();
+    warn('');
+persist();render();$('cloudDialog').close();sync();
   });
   $('disconnect').addEventListener('click',()=>{
     persist();generation++;busy=false;clearTimeout(timer);clearTimeout(saveTimer);config=null;authBlocked=false;syncText='';lastSync='';sessionSave(false);$('remember').checked=false;$('accessKey').value='';

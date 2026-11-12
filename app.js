@@ -15,6 +15,13 @@
   let day = $('date').value;
   function validDate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s+'T00:00:00Z')) && new Date(s+'T00:00:00Z').toISOString().slice(0,10) === s; }
   function validateCell(k, v) {
+    if (/^student\|s(?:0[1-9]|1[0-9]|2[0-7])\|roleName$/.test(k)) return typeof v === 'string' && v.length <= 60;
+    const task = k.match(/^task\|(\d{4}-\d{2}-\d{2})\|(legacy|a[a-z0-9-]+)\|title$/);
+    if (task) return validDate(task[1]) && typeof v === 'string' && v.trim().length > 0 && v.length <= 80;
+    const rating = k.match(/^day\|(\d{4}-\d{2}-\d{2})\|s(?:0[1-9]|1[0-9]|2[0-7])\|roleRating$/);
+    if (rating) return validDate(rating[1]) && ['', 'great', 'normal', 'effort', 'rest'].includes(v);
+    const submission = k.match(/^day\|(\d{4}-\d{2}-\d{2})\|s(?:0[1-9]|1[0-9]|2[0-7])\|homework_a[a-z0-9-]+$/);
+    if (submission) return validDate(submission[1]) && typeof v === 'boolean';
     if (/^student\|s(?:0[1-9]|1[0-9]|2[0-7])\|name$/.test(k)) return typeof v === 'string' && v.trim().length > 0 && v.length <= 40;
     if (/^student\|s(?:0[1-9]|1[0-9]|2[0-7])\|number$/.test(k)) return Number.isInteger(v) && v >= 1 && v <= 999;
     if (/^student\|s(?:0[1-9]|1[0-9]|2[0-7])\|milk$/.test(k)) return typeof v === 'boolean';
@@ -54,7 +61,43 @@
   function student(id) { const n=IDS.indexOf(id)+1; return {id,number:value(skey(id,'number'),n),name:value(skey(id,'name'),`${n}번 학생`),milk:value(skey(id,'milk'),false)}; }
   const customOn = () => value('config|customEnabled',false);
   const customTitle = () => value('config|customName','추가 항목') || '추가 항목';
-  const checked = (id,col) => value(dkey(id,col),false) === true;
+  const RATINGS = [['','미평가'],['great','◎ 잘함'],['normal','○ 보통'],['effort','☆ 노력요함'],['rest','△ 쉼']];
+  const taskKey = id => `task|${day}|${id}|title`;
+  const taskCol = id => id === 'legacy' ? 'homework' : `homework_${id}`;
+  function tasks() {
+    const prefix = `task|${day}|`;
+    const ids = Object.keys(doc.cells).filter(k => k.startsWith(prefix) && k.endsWith('|title')).map(k => k.split('|')[2]);
+    return ['legacy', ...ids.filter(id => id !== 'legacy').sort()].map(id => ({id, title:value(taskKey(id), '과제 1 (기존 숙제)')}));
+  }
+  const checked = (id,col) => col === 'role' ? !!value(dkey(id,'roleRating'),'') : value(dkey(id,col),false) === true;
+  function changeTask(id) {
+    const next = prompt('과제명을 입력하세요. (최대 80자)', value(taskKey(id),'과제 1 (기존 숙제)'));
+    if (next === null) return;
+    if (!next.trim() || next.trim().length > 80) { alert('과제명은 1~80자로 입력하세요.'); return; }
+    writeBatch([[taskKey(id),next.trim()]]);
+  }
+  let taskSignature = '';
+  function renderTasks() {
+    const list = tasks(), signature = JSON.stringify([day,list]);
+    if (signature === taskSignature) return;
+    taskSignature = signature;
+    $('taskList').replaceChildren();
+    for (const task of list) {
+      const button = document.createElement('button'); button.type='button';
+      button.textContent = `${task.title} · 이름 수정`;
+      button.addEventListener('click',()=>changeTask(task.id)); $('taskList').append(button);
+    }
+    for (const [id,r] of rows) {
+      r.homework.replaceChildren(); r.taskChecks = new Map();
+      for (const task of list) {
+        const label=document.createElement('label'), box=document.createElement('input'), text=document.createElement('span');
+        box.type='checkbox'; text.textContent=task.title; label.append(box,text);r.homework.append(label);
+        box.addEventListener('change',()=>editCheck(id,taskCol(task.id),box.checked));
+        r.taskChecks.set(task.id,box);
+      }
+    }
+  }
+
   function storageKey() { return `classroom-v1:${scope}`; }
   function persist() {
     try { localStorage.setItem(storageKey(),JSON.stringify({doc,pending,revision:localRevision})); }
@@ -78,6 +121,7 @@
   }
   function completion(col) {
     const students=IDS.map(student).filter(s=>col!=='milk'||s.milk);
+    if (col === 'homework') return {done:students.reduce((n,s)=>n+tasks().filter(t=>checked(s.id,taskCol(t.id))).length,0),total:students.length*tasks().length};
     return {done:students.filter(s=>checked(s.id,col)).length,total:students.length};
   }
   function totals() {
@@ -106,47 +150,59 @@
   }
   function createRows() {
     for (const id of IDS) {
-      const tr=document.createElement('tr');const num=document.createElement('td');const name=document.createElement('td');tr.append(num,name);
-      const checks={};const cells={};
-      for(const col of ['milk','homework','role','custom']) {
-        const td=document.createElement('td');td.className='checkcell';const label=document.createElement('label');
-        const box=document.createElement('input');box.type='checkbox';label.append(box);td.append(label);tr.append(td);
+      const tr=document.createElement('tr'), num=document.createElement('td'), name=document.createElement('td');tr.append(num,name);
+      const checks={},cells={};
+      function checkCell(col) {
+        const td=document.createElement('td'),label=document.createElement('label'),box=document.createElement('input');
+        td.className='checkcell';box.type='checkbox';label.append(box);td.append(label);tr.append(td);
         box.addEventListener('change',()=>editCheck(id,col,box.checked));checks[col]=box;cells[col]=td;
       }
-      const td=document.createElement('td');const note=document.createElement('input');note.type='text';note.className='note';note.maxLength=500;note.placeholder='특이사항을 기록하세요';
-      note.addEventListener('input',()=>writeBatch([[dkey(id,'note'),note.value]]));
-      note.addEventListener('blur',()=>render());td.append(note);tr.append(td);
-      $('students').append(tr);rows.set(id,{tr,num,name,checks,cells,note});
+      checkCell('milk');
+      const homework=document.createElement('td');homework.className='taskchecks';tr.append(homework);
+      const roleCell=document.createElement('td'),roleName=document.createElement('input'),rating=document.createElement('select'),legacy=document.createElement('small');
+      roleCell.className='rolecell';roleName.type='text';roleName.maxLength=60;roleName.placeholder='역할명 입력';
+      roleName.addEventListener('input',()=>writeBatch([[skey(id,'roleName'),roleName.value]]));
+      for(const [val,label] of RATINGS){const option=document.createElement('option');option.value=val;option.textContent=label;rating.append(option);}
+      rating.addEventListener('change',()=>writeBatch([[dkey(id,'roleRating'),rating.value]]));
+      legacy.textContent='이전 버전에서 완료 체크한 기록이 있습니다.';
+      roleCell.append(roleName,rating,legacy);tr.append(roleCell);checkCell('custom');
+      const td=document.createElement('td'),note=document.createElement('input');note.type='text';note.className='note';note.maxLength=500;note.placeholder='특이사항을 기록하세요';
+      note.addEventListener('input',()=>writeBatch([[dkey(id,'note'),note.value]]));td.append(note);tr.append(td);
+      $('students').append(tr);rows.set(id,{tr,num,name,checks,cells,note,homework,roleName,rating,legacy,taskChecks:new Map()});
     }
   }
   function render() {
-    const custom=customOn(), title=customTitle(), query=$('search').value.trim().toLocaleLowerCase(), only=$('incomplete').checked;
+    renderTasks();
+    const custom=customOn(),title=customTitle(),query=$('search').value.trim().toLocaleLowerCase(),only=$('incomplete').checked;
     let count=0;
-    for(const s of IDS.map(student).sort((a,b)=>a.number-b.number||a.id.localeCompare(b.id))) {
-      const r=rows.get(s.id);r.num.textContent=s.number;r.name.textContent=s.name;r.cells.custom.hidden=!custom;
-      r.checks.milk.disabled=!s.milk;
-      for(const col of ['milk','homework','role','custom']) {
-        r.checks[col].checked=col==='milk'&&!s.milk ? false : checked(s.id,col);
-        const label={milk:'우유 급식',homework:'숙제 제출',role:'1인 1역',custom:title}[col];
-        r.checks[col].setAttribute('aria-label',`${s.number}번 ${s.name} ${label}${col==='milk'&&!s.milk?' (대상 아님)':''}`);
-      }
-      if(document.activeElement!==r.note) r.note.value=value(dkey(s.id,'note'),'');
-      r.note.setAttribute('aria-label',`${s.number}번 ${s.name} 비고`);
-      const done=(!s.milk||checked(s.id,'milk'))&&checked(s.id,'homework')&&checked(s.id,'role')&&(!custom||checked(s.id,'custom'));
-      const match=!query||s.name.toLocaleLowerCase().includes(query)||String(s.number).includes(query.replace(/번\s*$/,''));
-      r.tr.hidden=!match||(only&&done);r.tr.classList.toggle('complete',done);if(!r.tr.hidden) count++;
-      // Move only when the order changed so active memo fields retain their focus.
-    }
     const sorted=IDS.map(student).sort((a,b)=>a.number-b.number||a.id.localeCompare(b.id));
+    for(const s of sorted) {
+      const r=rows.get(s.id);r.num.textContent=s.number;r.name.textContent=s.name;r.cells.custom.hidden=!custom;r.checks.milk.disabled=!s.milk;
+      for(const col of ['milk','custom']) {
+        r.checks[col].checked=col==='milk'&&!s.milk?false:checked(s.id,col);
+        r.checks[col].setAttribute('aria-label',`${s.number}번 ${s.name} ${col==='milk'?'우유 급식':title}`);
+      }
+      for(const task of tasks()) {
+        const box=r.taskChecks.get(task.id);box.checked=checked(s.id,taskCol(task.id));box.setAttribute('aria-label',`${s.number}번 ${s.name} ${task.title} 제출`);
+      }
+      if(document.activeElement!==r.roleName)r.roleName.value=value(skey(s.id,'roleName'),'');
+      r.roleName.setAttribute('aria-label',`${s.name} 역할명`);
+      r.rating.value=value(dkey(s.id,'roleRating'),'');r.rating.setAttribute('aria-label',`${s.name} 역할 평가`);
+      r.legacy.hidden=!(value(dkey(s.id,'role'),false) && !r.rating.value);
+      if(document.activeElement!==r.note)r.note.value=value(dkey(s.id,'note'),'');r.note.setAttribute('aria-label',`${s.name} 비고`);
+      const done=(!s.milk||checked(s.id,'milk'))&&tasks().every(t=>checked(s.id,taskCol(t.id)))&&checked(s.id,'role')&&(!custom||checked(s.id,'custom'));
+      const match=!query||s.name.toLocaleLowerCase().includes(query)||String(s.number).includes(query.replace(/번\s*$/,''));
+      r.tr.hidden=!match||(only&&done);r.tr.classList.toggle('complete',done);if(!r.tr.hidden)count++;
+    }
     sorted.forEach((s,i)=>{const tr=rows.get(s.id).tr;if($('students').children[i]!==tr)$('students').insertBefore(tr,$('students').children[i]||null);});
     $('customHead').hidden=!custom;$('headCustom').textContent=title;$('visibleCount').textContent=`${count}명 표시`;$('empty').hidden=count!==0;
     for(const col of ['milk','homework','role']) {
       const c=completion(col);$(col+'Count').textContent=`${c.done} / ${c.total}`;
-      $(col+'Pct').textContent=c.total?`${Math.round(c.done/c.total*100)}% 완료`:'대상자가 없습니다.';
+      $(col+'Pct').textContent=c.total?`${Math.round(c.done/c.total*100)}% ${col==='role'?'평가 입력':'완료'}`:'대상자가 없습니다.';
       if(col==='milk'){$('milkLabel').textContent=`우유 급식 · ${c.total}명`;$('headMilk').textContent=`우유 급식 (${c.total}명)`;}
     }
-    for(const button of document.querySelectorAll('[data-column]')) {const c=completion(button.dataset.column);button.disabled=c.total===0;button.setAttribute('aria-label',`${button.textContent}: 모든 대상자 ${c.total&&c.done===c.total?'체크 해제':'체크'}`);}
-    const t=totals(),pct=t.total?Math.round(t.done/t.total*100):0;$('totalPct').textContent=pct+'%';$('progress').value=pct;$('totalCount').textContent=`${t.done} / ${t.total}개 완료${custom?' · 추가 항목 포함':''}`;
+    for(const button of document.querySelectorAll('[data-column]')){const c=completion(button.dataset.column);button.disabled=c.total===0;button.setAttribute('aria-label',`${button.textContent}: 모든 대상자 체크 또는 해제`);}
+    const t=totals(),pct=t.total?Math.round(t.done/t.total*100):0;$('totalPct').textContent=pct+'%';$('progress').value=pct;$('totalCount').textContent=`${t.done} / ${t.total}개 기록 완료`;
   }
   function updateStatus() {
     let text;
@@ -162,26 +218,10 @@
     try {
       const headers={'X-Access-Key':cfg.key};if(method==='PUT'){headers['Content-Type']='application/json';headers['X-Bin-Versioning']='false';}
       const response=await fetch(`https://api.jsonbin.io/v3/b/${cfg.bin}${method==='GET'?'/latest?meta=false':''}`,{method,headers,body:body?JSON.stringify(body):undefined,signal:controller.signal,cache:'no-store',credentials:'omit',redirect:'error'});
-      if (!response.ok) {
-  let detail = '';
-
-  try {
-    const errorBody = await response.json();
-    if (typeof errorBody.message === 'string') {
-      detail = errorBody.message;
-    }
-  } catch (_) {
-    // 오류 응답이 JSON이 아니어도 상태 코드는 표시합니다.
-  }
-
-  const e = new Error(
-    `JSONbin ${method} 오류 (HTTP ${response.status})` +
-    (detail ? `: ${detail}` : '')
-  );
-  e.status = response.status;
-  throw e;
-}
-
+      if(!response.ok) {
+        let detail='';try{const data=await response.json();if(typeof data.message==='string')detail=data.message;}catch(_){}
+        const e=new Error(`JSONbin ${method} 오류 (HTTP ${response.status})${detail?': '+detail:''}`);e.status=response.status;throw e;
+      }
       const raw=await response.json();
       return method==='GET'?validated(raw,true):raw;
     } finally {clearTimeout(timeout);}
@@ -212,7 +252,7 @@
       if([400,401,403,404].includes(e.status)||(!e.status && e.name!=='AbortError' && /데이터|Bin/.test(e.message))) {
         authBlocked=true;
         syncText='';
-$('cloudError').textContent = e.message;
+        $('cloudError').textContent=e.message;
         warn($('cloudError').textContent);
       } else syncText=e.status===429?'요청 한도에 도달했습니다. 조회 간격을 늘리세요. 자동 재시도 간격을 늘렸습니다.':`통신 실패${e.name==='AbortError'?' (10초 시간 초과)':''} · 이 기기의 기록을 유지하며 자동 재시도합니다.`;
     } finally {
@@ -225,6 +265,7 @@ $('cloudError').textContent = e.message;
     const next=c.done!==c.total;writeBatch(IDS.map(student).filter(s=>col!=='milk'||s.milk).map(s=>[dkey(s.id,col),next]));
     if(next)celebrate(allDone()?'오늘의 모든 항목을 완료했어요!':'이 항목을 모두 완료했어요!');
   }));
+  $('addTask').addEventListener('click',()=>changeTask('a'+CLIENT+'-'+Date.now().toString(36)));
   $('date').addEventListener('change',()=>{if(validDate($('date').value)){day=$('date').value;render();}else $('date').value=day;});
   $('search').addEventListener('input',render);$('incomplete').addEventListener('change',render);
   document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.close).close()));
@@ -275,8 +316,7 @@ $('cloudError').textContent = e.message;
     if(scope!==bin)loadScope(bin);
     if(include&&offline){doc=merge(doc,offline);pending=true;observeClock();}
     config={bin,key,poll:Number($('pollSeconds').value)};sessionSave($('remember').checked);$('accessKey').value='';$('cloudError').textContent='';
-    warn('');
-persist();render();$('cloudDialog').close();sync();
+    warn('');persist();render();$('cloudDialog').close();sync();
   });
   $('disconnect').addEventListener('click',()=>{
     persist();generation++;busy=false;clearTimeout(timer);clearTimeout(saveTimer);config=null;authBlocked=false;syncText='';lastSync='';sessionSave(false);$('remember').checked=false;$('accessKey').value='';

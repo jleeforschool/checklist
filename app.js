@@ -15,6 +15,8 @@
   let day = $('date').value;
   function validDate(s) { return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s+'T00:00:00Z')) && new Date(s+'T00:00:00Z').toISOString().slice(0,10) === s; }
   function validateCell(k, v) {
+    const meta = k.match(/^task\|(\d{4}-\d{2}-\d{2})\|(legacy|a[a-z0-9-]+)\|(hidden|due)$/);
+    if (meta) return validDate(meta[1]) && (meta[3] === 'hidden' ? typeof v === 'boolean' : typeof v === 'string' && (v === '' || validDate(v))); 
     if (/^student\|s(?:0[1-9]|1[0-9]|2[0-7])\|roleName$/.test(k)) return typeof v === 'string' && v.length <= 60;
     const task = k.match(/^task\|(\d{4}-\d{2}-\d{2})\|(legacy|a[a-z0-9-]+)\|title$/);
     if (task) return validDate(task[1]) && typeof v === 'string' && v.trim().length > 0 && v.length <= 80;
@@ -62,40 +64,95 @@
   const customOn = () => value('config|customEnabled',false);
   const customTitle = () => value('config|customName','추가 항목') || '추가 항목';
   const RATINGS = [['','미평가'],['great','◎ 잘함'],['normal','○ 보통'],['effort','☆ 노력요함'],['rest','△ 쉼']];
-  const taskKey = id => `task|${day}|${id}|title`;
-  const taskCol = id => id === 'legacy' ? 'homework' : `homework_${id}`;
-  function tasks() {
-    const prefix = `task|${day}|`;
-    const ids = Object.keys(doc.cells).filter(k => k.startsWith(prefix) && k.endsWith('|title')).map(k => k.split('|')[2]);
-    return ['legacy', ...ids.filter(id => id !== 'legacy').sort()].map(id => ({id, title:value(taskKey(id), '과제 1 (기존 숙제)')}));
+  // Keep the original dated keys: carried tasks share the same submission record.
+  const taskKey = (uid, field='title') => {
+    const [origin,id] = uid.split(':');
+    return `task|${origin}|${id}|${field}`;
+  };
+  const taskCol = uid => `assignment@${uid}`;
+  function submissionKey(studentId,uid) {
+    const [origin,id] = uid.split(':');
+    return `day|${origin}|${studentId}|${id === 'legacy' ? 'homework' : 'homework_'+id}`;
   }
-  const checked = (id,col) => col === 'role' ? !!value(dkey(id,'roleRating'),'') : value(dkey(id,col),false) === true;
-  function changeTask(id) {
-    const next = prompt('과제명을 입력하세요. (최대 80자)', value(taskKey(id),'과제 1 (기존 숙제)'));
-    if (next === null) return;
-    if (!next.trim() || next.trim().length > 80) { alert('과제명은 1~80자로 입력하세요.'); return; }
-    writeBatch([[taskKey(id),next.trim()]]);
+  function allTasks() {
+    const found = new Map();
+    for (const key of Object.keys(doc.cells)) {
+      let m = key.match(/^task\|(\d{4}-\d{2}-\d{2})\|(legacy|a[a-z0-9-]+)\|title$/);
+      if (m) found.set(`${m[1]}:${m[2]}`,true);
+      m = key.match(/^day\|(\d{4}-\d{2}-\d{2})\|s\d{2}\|(homework|homework_(a[a-z0-9-]+))$/);
+      if (m) found.set(`${m[1]}:${m[3] || 'legacy'}`,true);
+    }
+    return [...found.keys()].sort().map(uid => {
+      const [origin,sourceId] = uid.split(':');
+      return {id:uid, origin, sourceId, title:value(taskKey(uid),'과제 1 (기존 숙제)'),
+        due:value(taskKey(uid,'due'),''),hidden:value(taskKey(uid,'hidden'),false)};
+    });
+  }
+  function tasks() { return allTasks().filter(t => t.origin <= day && !t.hidden); }
+  const checked = (id,col) => col.startsWith('assignment@')
+    ? value(submissionKey(id,col.slice(11)),false) === true
+    : col === 'role' ? !!value(dkey(id,'roleRating'),'') : value(dkey(id,col),false) === true;
+  function taskCompletion(uid) {
+    return {done:IDS.filter(id => checked(id,taskCol(uid))).length,total:IDS.length};
+  }
+  let editingTask = null;
+  function changeTask(uid=null) {
+    editingTask=uid;
+    $('taskDialogTitle').textContent=uid?'과제 수정':'과제 추가';
+    $('taskTitleInput').value=uid?value(taskKey(uid),'과제 1 (기존 숙제)'):'';
+    $('taskDueInput').value=uid?value(taskKey(uid,'due'),''):day;
+    $('taskFormError').textContent='';
+    $('taskDialog').showModal();$('taskTitleInput').focus();
+  }
+  function taskButton(text,action) {
+    const b=document.createElement('button');b.type='button';b.textContent=text;
+    b.addEventListener('click',action);return b;
+  }
+  function taskDescription(task) {
+    const c=taskCompletion(task.id);
+    return `등록 ${task.origin}${task.due?' · 마감 '+task.due:''} · 제출 ${c.done}/${c.total}명${c.done===c.total?' · 완료':''}${task.due && task.due<day && c.done<c.total?' · 기한 지남':''}`;
   }
   let taskSignature = '';
   function renderTasks() {
-    const list = tasks(), signature = JSON.stringify([day,list]);
-    if (signature === taskSignature) return;
-    taskSignature = signature;
-    $('taskList').replaceChildren();
-    for (const task of list) {
-      const button = document.createElement('button'); button.type='button';
-      button.textContent = `${task.title} · 이름 수정`;
-      button.addEventListener('click',()=>changeTask(task.id)); $('taskList').append(button);
+    const list=tasks(),hidden=allTasks().filter(t=>t.origin<=day && t.hidden);
+    const signature=JSON.stringify([day,list.map(t=>[t,taskCompletion(t.id)]),hidden.map(t=>[t,taskCompletion(t.id)]),$('showHiddenTasks').checked]);
+    if(signature===taskSignature)return;
+    taskSignature=signature;$('taskList').replaceChildren();
+    const shown=[...list,...($('showHiddenTasks').checked?hidden:[])];
+    for(const task of shown) {
+      const card=document.createElement('div');card.className='assignment-card';
+      const name=document.createElement('strong');name.textContent=task.title;
+      const detail=document.createElement('small');detail.textContent=taskDescription(task)+(task.hidden?' · 숨김 상태':'');
+      const actions=document.createElement('div');actions.className='assignment-actions';
+      actions.append(taskButton('수정',()=>changeTask(task.id)),taskButton(task.hidden?'다시 표시':'숨기기',()=>writeBatch([[taskKey(task.id,'hidden'),!task.hidden]])));
+      card.append(name,detail,actions);$('taskList').append(card);
     }
-    for (const [id,r] of rows) {
-      r.homework.replaceChildren(); r.taskChecks = new Map();
-      for (const task of list) {
-        const label=document.createElement('label'), box=document.createElement('input'), text=document.createElement('span');
-        box.type='checkbox'; text.textContent=task.title; label.append(box,text);r.homework.append(label);
-        box.addEventListener('change',()=>editCheck(id,taskCol(task.id),box.checked));
-        r.taskChecks.set(task.id,box);
+    if(!shown.length){const p=document.createElement('p');p.textContent='표시할 과제가 없습니다. 과제를 추가하거나 이전 과제를 가져오세요.';$('taskList').append(p);}
+    $('hiddenTaskCount').textContent=`숨긴 과제 ${hidden.length}개`;
+    $('hideCompletedTasks').disabled=!list.some(t=>taskCompletion(t.id).done===IDS.length);
+    for(const [id,r] of rows) {
+      r.homework.replaceChildren();r.taskChecks=new Map();
+      for(const task of list) {
+        const label=document.createElement('label'),box=document.createElement('input'),text=document.createElement('span');
+        box.type='checkbox';text.textContent=task.title+(task.origin<day?` (${task.origin})`:'');
+        label.append(box,text);r.homework.append(label);
+        box.addEventListener('change',()=>editCheck(id,taskCol(task.id),box.checked));r.taskChecks.set(task.id,box);
       }
+      if(!list.length)r.homework.textContent='표시 중인 과제가 없습니다.';
     }
+  }
+  function renderArchive() {
+    $('archiveList').replaceChildren();
+    const list=allTasks().filter(t=>t.origin<=day && (!$('archiveDate').value || t.origin===$('archiveDate').value));
+    for(const task of list) {
+      const card=document.createElement('div');card.className='assignment-card';
+      const name=document.createElement('strong');name.textContent=task.title;
+      const detail=document.createElement('small');detail.textContent=taskDescription(task);
+      const b=taskButton(task.hidden?'가져오기 · 제출 체크 유지':'현재 표시 중',()=>{
+        writeBatch([[taskKey(task.id,'hidden'),false]]);renderArchive();
+      });b.disabled=!task.hidden;card.append(name,detail,b);$('archiveList').append(card);
+    }
+    if(!list.length){const p=document.createElement('p');p.textContent='해당 날짜까지 저장된 과제가 없습니다. 기존 JSON 백업을 불러오거나 등록 날짜를 확인하세요.';$('archiveList').append(p);}
   }
 
   function storageKey() { return `classroom-v1:${scope}`; }
@@ -121,6 +178,7 @@
   }
   function completion(col) {
     const students=IDS.map(student).filter(s=>col!=='milk'||s.milk);
+    if(col.startsWith('assignment@')) return taskCompletion(col.slice(11));
     if (col === 'homework') return {done:students.reduce((n,s)=>n+tasks().filter(t=>checked(s.id,taskCol(t.id))).length,0),total:students.length*tasks().length};
     return {done:students.filter(s=>checked(s.id,col)).length,total:students.length};
   }
@@ -144,7 +202,7 @@
   }
   function editCheck(id,col,next) {
     const before=allDone(); const columnBefore=completion(col);
-    writeBatch([[dkey(id,col),next]]);
+    writeBatch([[col.startsWith('assignment@') ? submissionKey(id,col.slice(11)) : dkey(id,col),next]]);
     const columnAfter=completion(col);
     if ((!before && allDone()) || (columnBefore.done<columnBefore.total && columnAfter.done===columnAfter.total)) celebrate(allDone()?'오늘의 모든 항목을 완료했어요!':'이 항목을 모두 완료했어요!');
   }
@@ -265,7 +323,34 @@
     const next=c.done!==c.total;writeBatch(IDS.map(student).filter(s=>col!=='milk'||s.milk).map(s=>[dkey(s.id,col),next]));
     if(next)celebrate(allDone()?'오늘의 모든 항목을 완료했어요!':'이 항목을 모두 완료했어요!');
   }));
-  $('addTask').addEventListener('click',()=>changeTask('a'+CLIENT+'-'+Date.now().toString(36)));
+  $('addTask').addEventListener('click',()=>changeTask());
+  $('taskForm').addEventListener('submit',event=>{
+    event.preventDefault();const title=$('taskTitleInput').value.trim(),due=$('taskDueInput').value;
+    if(!title || title.length>80 || (due && !validDate(due))){$('taskFormError').textContent='과제명과 마감일을 확인하세요.';return;}
+    const uid=editingTask || `${day}:a${CLIENT}-${Date.now().toString(36)}`;
+    writeBatch([[taskKey(uid),title],[taskKey(uid,'due'),due]]);$('taskDialog').close();
+  });
+  $('showHiddenTasks').addEventListener('change',render);
+  $('hideCompletedTasks').addEventListener('click',()=>writeBatch(tasks().filter(t=>taskCompletion(t.id).done===IDS.length).map(t=>[taskKey(t.id,'hidden'),true])));
+  $('previousTasks').addEventListener('click',()=>{$('archiveDate').value='';$('archiveDate').max=day;renderArchive();$('archiveDialog').showModal();});
+  $('archiveDate').addEventListener('change',renderArchive);
+  $('clearArchiveDate').addEventListener('click',()=>{$('archiveDate').value='';renderArchive();});
+  $('hideDateTasks').addEventListener('click',()=>{
+    const list=allTasks().filter(t=>t.origin===day && !t.hidden);
+    if(!list.length){alert('선택한 날짜에 등록한 표시 중인 과제가 없습니다.');return;}
+    if(confirm(`${day}에 등록한 과제 ${list.length}개를 숨길까요? 제출 기록은 보존되고 이전 과제 가져오기에서 복원할 수 있습니다.`))writeBatch(list.map(t=>[taskKey(t.id,'hidden'),true]));
+  });
+  $('importBackup').addEventListener('click',()=>$('backupFile').click());
+  $('backupFile').addEventListener('change',async event=>{
+    const file=event.target.files[0];if(!file)return;
+    try{
+      if(file.size>10000000)throw new Error('10MB 이하의 JSON 파일을 선택하세요.');
+      const raw=JSON.parse(await file.text()),incoming=validated(raw.doc || raw);
+      if(!confirm('백업을 현재 학급에 병합할까요? 다른 학급의 기록은 섞지 마세요. 같은 항목은 수정 시각이 최신인 값이 적용됩니다.'))return;
+      doc=merge(doc,incoming);observeClock();pending=true;localRevision++;persist();render();updateStatus();
+      clearTimeout(saveTimer);saveTimer=setTimeout(sync,750);alert('백업을 불러왔습니다. 이전 과제는 등록 날짜 이후에 표시됩니다. 숨긴 과제는 이전 과제 가져오기에서 복원하세요.');
+    }catch(e){alert('백업 불러오기 실패: '+e.message);}finally{event.target.value='';}
+  });
   $('date').addEventListener('change',()=>{if(validDate($('date').value)){day=$('date').value;render();}else $('date').value=day;});
   $('search').addEventListener('input',render);$('incomplete').addEventListener('change',render);
   document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>$(b.dataset.close).close()));
